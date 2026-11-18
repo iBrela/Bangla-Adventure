@@ -383,7 +383,8 @@ site file works unchanged:
 ```sh
 sudo apt-get install -y nginx certbot python3-certbot-nginx
 sudo cp bangla-adventures.conf.example /etc/nginx/sites-available/bangla-adventures.conf   # from deploy/nginx/
-sudo sed -i 's/example\.org/DOMAIN/g' /etc/nginx/sites-available/bangla-adventures.conf
+# For a fallback using a different hostname, substitute that name for DOMAIN below.
+sudo sed -i 's/banglaadventure\.com/DOMAIN/g' /etc/nginx/sites-available/bangla-adventures.conf
 sudo certbot certonly --nginx -d DOMAIN
 sudo ln -s /etc/nginx/sites-available/bangla-adventures.conf /etc/nginx/sites-enabled/
 sudo rm /etc/nginx/sites-enabled/default

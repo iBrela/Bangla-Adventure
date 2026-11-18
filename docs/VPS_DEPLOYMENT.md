@@ -253,7 +253,7 @@ Before the domain is confirmed:
 
 Once the client confirms the domain, going live is DNS, one Nginx site, its
 certificate, one server value and the deployment switch, in this order. `DOMAIN`
-below is the confirmed name, for example `learn.example.org`.
+below is `banglaadventure.com` on the production VPS.
 
 1. **Domain.** The client confirms one public name; once `PUBLIC_ORIGIN` names
    it, the app accepts sign-ins from that address alone. If it is a bare domain
@@ -266,10 +266,11 @@ below is the confirmed name, for example `learn.example.org`.
    print that address.
 3. **Nginx and certificate** (Faysal). Copy
    [`deploy/nginx/bangla-adventures.conf.example`](../deploy/nginx/bangla-adventures.conf.example)
-   to `/etc/nginx/sites-available/bangla-adventures.conf` and replace every
-   `example.org` in it with `DOMAIN`. Get the certificate before enabling the
-   site: `nginx -t` rejects its HTTPS server until certbot has created
-   `/etc/letsencrypt/live/DOMAIN/`.
+   to `/etc/nginx/sites-available/bangla-adventures.conf`. It already names
+   `banglaadventure.com`, including the HTTP redirect and certificate paths.
+   Check the active site files for an existing `server_name banglaadventure.com`
+   before enabling the site. Keep one definition for this hostname on each port.
+   Obtain its certificate before enabling the HTTPS server.
 
    The site shares ports 80 and 443 with the server's other sites, which keep
    their own files. On Nginx 1.24 the `http2` flag on its two 443 `listen` lines
@@ -280,11 +281,11 @@ below is the confirmed name, for example `learn.example.org`.
    file it loads, which may then be this one; mark the intended default first.
 
    ```sh
-   sudo certbot certonly --nginx -d DOMAIN
+   sudo certbot certonly --nginx -d banglaadventure.com
    sudo ln -s /etc/nginx/sites-available/bangla-adventures.conf /etc/nginx/sites-enabled/
    sudo nginx -t
    sudo systemctl reload nginx
-   sudo certbot renew --dry-run
+   sudo certbot renew --cert-name banglaadventure.com --dry-run
    ```
 
    `certonly` leaves the site file as written. certbot's nginx plugin answers
