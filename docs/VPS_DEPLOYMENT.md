@@ -177,8 +177,10 @@ image together. A failed first release stops its container and removes its candi
 files; the operator-managed `.env` remains in place. If rollback itself fails, the
 log identifies the private `.deploy-transaction.*` directory retained for recovery.
 
-The GitHub workflow enforces `DEPLOY_REQUIRE_ROOTLESS=true` and
-`DEPLOY_REQUIRE_PUBLIC_HEALTH=true`; repository variables cannot turn these off.
+GitHub requires rootless Docker for every release. Ordinary releases also require
+public HTTPS health. The explicit manual **deploy_loopback** run checks the VPS
+loopback service, then reports public DNS and HTTPS observations from the runner
+so Faysal can configure Nginx independently.
 Those names are environment settings for portable/manual script use. The server
 also needs `curl` and its system CA certificates for the HTTPS check.
 

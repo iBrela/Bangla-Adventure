@@ -354,7 +354,7 @@ class Production:
         return self.lock(self.s.deployment / ".deploy.lock")
 
     def deploy_busy(self) -> bool:
-        """Whether a deploy or backup holds the deploy lock, read from /proc/locks without taking it."""
+        """Observe a deploy or backup's flock without competing for it."""
         path = self.s.deployment / ".deploy.lock"
         if not os.path.lexists(path):
             raise Refused("deployment-missing")
@@ -369,8 +369,30 @@ class Production:
         except (OSError, ValueError) as exc:
             raise Refused("lock-state-unreadable") from exc
         # A "->" line is a waiter, not a holder; flock(1) and Python's flock both appear as FLOCK.
-        return any(len(fields) >= 6 and fields[1] == "FLOCK" and fields[5].rpartition(":")[2] == inode
-                   for fields in map(str.split, table.splitlines()))
+        def holds_flock(lines):
+            return any(len(fields) >= 6 and fields[1] == "FLOCK" and fields[5].rpartition(":")[2] == inode
+                       for fields in map(str.split, lines))
+
+        if holds_flock(table.splitlines()):
+            return True
+        # deploy-remote.sh keeps fd 9 open after the short-lived flock(1) process exits.
+        # A PID namespace can omit that lock from /proc/locks. The descriptor's fdinfo
+        # still records the lock. Only inspect a descriptor that refers to this exact file.
+        for descriptor in Path("/proc").glob("[0-9]*/fd/9"):
+            try:
+                if not os.path.samestat(descriptor.stat(), info):
+                    continue
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            try:
+                fdinfo = (descriptor.parent.parent / "fdinfo" / "9").read_text(encoding="ascii")
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # The holder closed the descriptor or exited.
+            except OSError as exc:
+                raise Refused("lock-state-unreadable") from exc
+            if holds_flock(line[5:] for line in fdinfo.splitlines() if line.startswith("lock:")):
+                return True
+        return False
 
     def write_status(self, action: str, value: dict) -> None:
         private_dir(self.s.ops, self.s.uid)

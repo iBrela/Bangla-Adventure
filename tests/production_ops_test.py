@@ -990,14 +990,25 @@ class DeployLockTests(unittest.TestCase):
             os.close(fd)
         self.assertFalse(self.prod.deploy_busy())
         # The deploy's own shell acquisition, as in deploy-remote.sh.
-        holder = subprocess.Popen(['bash', '-c', 'exec 9> .deploy.lock; flock -n 9; echo held; sleep 30'], cwd=self.fx.deployment,
-                                  stdout=subprocess.PIPE, text=True)
+        holder = subprocess.Popen(['bash', '-ec', 'exec 9> .deploy.lock; echo open; read -r go; flock -n 9; echo held; read -r done'],
+                                  cwd=self.fx.deployment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        read_text = Path.read_text
+
+        def without_global_locks(path, **kwargs):
+            return '' if path == Path('/proc/locks') else read_text(path, **kwargs)
+
         try:
-            self.assertEqual(holder.stdout.readline().strip(), 'held')
-            self.assertTrue(self.prod.deploy_busy())
+            with patch.object(Path, 'read_text', without_global_locks):
+                self.assertEqual(holder.stdout.readline().strip(), 'open')
+                self.assertFalse(self.prod.deploy_busy())
+                holder.stdin.write('go\n')
+                holder.stdin.flush()
+                self.assertEqual(holder.stdout.readline().strip(), 'held')
+                self.assertTrue(self.prod.deploy_busy())
         finally:
-            holder.kill()
-            holder.wait()
+            holder.communicate('done\n')
+        self.assertEqual(holder.returncode, 0)
+        self.assertFalse(self.prod.deploy_busy())
 
     def test_watching_the_lock_never_makes_a_deploy_fail(self):
         stop = threading.Event()

@@ -5,6 +5,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import yaml from "js-yaml";
 
 const repository = new URL("../", import.meta.url);
 const hostPin = `SHA256:${"A".repeat(43)}`;
@@ -805,8 +806,14 @@ test("GitHub deployment requires the explicit gate and newest-check lookup error
   assert.ok(deploy.includes("if: vars.DEPLOY_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.deploy_loopback == true)"));
   assert.ok(deploy.includes("DEPLOY_HOST: '169.40.116.23'"));
   assert.match(deploy, /^          DEPLOY_USER: \$\{\{ secrets\.DEPLOY_USER \}\}$/m);
-  assert.match(deploy, /^          DEPLOY_REQUIRE_ROOTLESS: 'true'$/m);
-  assert.ok(deploy.includes('DEPLOY_REQUIRE_PUBLIC_HEALTH: ${{ inputs.deploy_loopback != true }}'));
+  const definition = yaml.load(workflow);
+  const bootstrap = definition.on.workflow_dispatch.inputs.deploy_loopback;
+  assert.equal(bootstrap.type, "boolean");
+  assert.equal(bootstrap.default, false);
+  const release = definition.jobs.deploy.steps.filter(step => step.run?.includes("bash scripts/deploy.sh"));
+  assert.equal(release.length, 1);
+  assert.equal(release[0].env.DEPLOY_REQUIRE_ROOTLESS, "true");
+  assert.equal(release[0].env.DEPLOY_REQUIRE_PUBLIC_HEALTH, "${{ inputs.deploy_loopback != true }}");
   assert.ok(deploy.includes('DEPLOY_PUBLIC_ORIGIN: https://banglaadventure.com'));
   assert.ok(deploy.includes("'unix:///run/user/1002/docker.sock'"));
   assert.match(deploy, /^          ELEVENLABS_API_KEY: \$\{\{ secrets\.ELEVENLABS_API_KEY \}\}$/m, "the narration key comes only from a secret");

@@ -216,6 +216,10 @@ overlay set-ups the kernel's device number differs from the one `stat` gives,
 which would hide every deploy. Another file with the same inode number on a
 different disk, locked at that moment, could only make a run defer, which is the
 safe direction; a lasting one would show as `monitor-report-stale`.
+Some PID namespaces omit a lock acquired by a `flock` process after that process
+exits. The monitor also checks the kernel lock record for open deployment file
+descriptor 9 when it points to the same `.deploy.lock` file. An open descriptor
+without a lock does not defer monitoring.
 
 | Check | Failure code |
 | --- | --- |
@@ -223,7 +227,7 @@ safe direction; a lasting one would show as `monitor-report-stale`.
 | The app container is running, and Docker reports it healthy | `app-not-running`, `app-unhealthy` |
 | The production TCP proxy is running and healthy with the current image | `proxy-not-running`, `proxy-unhealthy`, `proxy-image-mismatch` |
 | It runs the image named by `APP_IMAGE` in `.env` | `app-image-mismatch` |
-| Nothing in the project publishes a port except the app on `127.0.0.1:APP_PORT` | `port-exposed` |
+| Only the proxy (the app on older single-service releases) publishes `127.0.0.1:APP_PORT` | `port-exposed` |
 | At least 1 GiB free on the deployment filesystem (the staging threshold) | `disk-low` |
 | The newest successful-backup receipt names an existing archive | `backup-missing` |
 | That archive is at most 36 hours old and not more than 5 minutes in the future | `backup-stale-or-future` |
@@ -835,7 +839,7 @@ above:
 | `offsite-backend-unsupported`, `offsite-retention-invalid` | Unsupported repository, or incomplete retention settings |
 | `offsite-repository-missing`, `offsite-password-wrong`, `offsite-repository-locked` | restic exit codes 10, 12 and 11 |
 | `offsite-copy-failed`, `offsite-unverified`, `offsite-retention-failed`, `offsite-retention-timeout` | The copy, its snapshot check or the retention run failed; after a retention failure the copy still counts |
-| `lock-state-unreadable` | The monitor could not read `/proc/locks` |
+| `lock-state-unreadable` | The monitor could not read the kernel lock table or the deployment descriptor’s lock information |
 | `wrong-user`, `unsafe-deployment-directory`, `deployment-missing`, `rootless-socket`, `non-rootless-daemon`, `settings-invalid`, `app-image-missing`, `public-origin-invalid` | The server is not in the expected state |
 | `missing-directory`, `unsafe-directory`, `missing-file`, `unsafe-file`, `lock-owner` | A file or folder the jobs use is missing, or not a plain file or `0700` folder owned by the deployment user (for example `ops/`, `.env` or a result file) |
 | `installation-invalid` | The installed tools or units differ from the installation record: run `install` again |

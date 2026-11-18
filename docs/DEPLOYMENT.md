@@ -353,18 +353,18 @@ from the deployment folder: `docker compose exec app npm run admin:grant -- EMAI
 
 | Name | Kind | Value |
 | --- | --- | --- |
-| `DEPLOY_ENABLED` | Repository variable | Must be exactly `true` to enable deployment. Leave unset or `false` while preparing access, the domain and backups |
-| `DEPLOY_HOST` | `production` environment or repository secret | The server's name or address. A secret, so that GitHub masks it in the run logs of this public repository ([Server address secrets](VPS_DEPLOYMENT.md#server-address-secrets)). A deploy with `DEPLOY_ENABLED=true` and no `DEPLOY_HOST` stops with a message |
+| `DEPLOY_ENABLED` | Repository variable | Set to `true` for ordinary releases. A manual `deploy_loopback` run can bootstrap production while public HTTPS is being prepared |
+| `DEPLOY_HOST` | Production CI target | Production CI targets `169.40.116.23`. The separate staging and operations workflows use their own host secrets ([Server address secrets](VPS_DEPLOYMENT.md#server-address-secrets)) |
 | `DEPLOY_KNOWN_HOSTS` | Variable | The contents of `server.keys` (step 5 above) |
 | `DEPLOY_HOST_FINGERPRINT` | Variable | Expected SHA256 fingerprint; every supplied host-key line must match this pin |
 | `DEPLOY_KEY_FINGERPRINT` | Variable | Expected SHA256 fingerprint of the deployment key's public half |
-| `DEPLOY_USER` | `production` environment or repository secret | The SSH account on the server; required for the prepared VPS, whose account is in the server handover email. A secret for the same reason as `DEPLOY_HOST`. When unset the portable script uses `deploy` |
+| `DEPLOY_USER` | `production` environment or repository secret | The SSH account for production is `ba_deploy`. The deployment script uses this default when the secret is unset |
 | `DEPLOY_PORT` | Variable | Optional; default `22` |
 | `DEPLOY_PATH` | Variable | Optional; default `/opt/bangla-adventures` |
 | `DEPLOY_DOCKER_HOST` | Variable | Explicit daemon endpoint; for the prepared VPS, `unix:///run/user/1002/docker.sock` |
 | `DEPLOY_DOCKER_CONTEXT` | Variable | Alternative named context; use only one Docker selector |
 | `DEPLOY_REQUIRE_ROOTLESS` | Fixed workflow setting | GitHub enforces `true`; portable scripts accept this environment setting and default to `true` |
-| `DEPLOY_REQUIRE_PUBLIC_HEALTH` | Fixed workflow setting | GitHub enforces `true`; portable scripts accept this environment setting and default to `false` |
+| `DEPLOY_REQUIRE_PUBLIC_HEALTH` | Fixed workflow setting | Required for ordinary production releases. The manual `deploy_loopback` run verifies loopback and reports public HTTPS separately. Portable scripts default to `false` |
 | `PUBLIC_HEALTH_URL` | Variable | Optional HTTPS health URL; defaults to the server's `PUBLIC_ORIGIN` plus `/api/health` |
 | `DEPLOY_SSH_KEY` | Secret | The deploy user's private key |
 | `STATUS_SSH_KEY` | `production-status` environment secret | The private half of the daily production status check's own key, which the server limits to reading status; never the deploy key. That environment also needs `DEPLOY_HOST`, `DEPLOY_USER` and `DEPLOY_KNOWN_HOSTS` when they are `production` environment settings ([Alerting](PRODUCTION_OPERATIONS.md#alerting)) |
