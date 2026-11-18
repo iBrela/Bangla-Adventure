@@ -12,6 +12,12 @@ on:
     branches: ["**"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      deploy_loopback:
+        description: Deploy production to loopback port 3001 before the domain's Nginx/HTTPS setup
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -105,15 +111,14 @@ jobs:
           IMAGE_REF: ${{ needs.container.outputs.image_ref }}
         run: bash scripts/ci/publish.sh promote "${IMAGE_REF:?Missing verified image digest}" "$IMAGE:latest"
 
-  # Disabled until the repository variable DEPLOY_ENABLED=true. This gate runs before the production
-  # environment loads; public defaults below never enable deployment. The server's address and account
-  # are the secrets DEPLOY_HOST and DEPLOY_USER, set at repository level or on the production
-  # environment, so GitHub masks them in this public repository's logs; scripts/deploy.sh stops with
-  # a message when DEPLOY_HOST is missing.
+  # Ordinary releases require the repository variable DEPLOY_ENABLED=true; a manual loopback
+  # bootstrap is explicitly requested through workflow_dispatch. This gate runs before the production
+  # environment loads. The confirmed VPS address is the deployment target below; the SSH account
+  # and key remain in production secrets. SSH still verifies the previously supplied host-key pin.
   # Add required reviewers to the "production" environment to approve each deploy.
   deploy:
     needs: [container, publish]
-    if: vars.DEPLOY_ENABLED == 'true'
+    if: vars.DEPLOY_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.deploy_loopback == true)
     runs-on: ubuntu-latest
     environment: production
     concurrency:
@@ -140,20 +145,25 @@ jobs:
       - name: Deploy to the server
         if: steps.current.outputs.newest == 'true'
         env:
-          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_ENABLED: 'true'
+          DEPLOY_HOST: '169.40.116.23'
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/bangla-adventures' }}
+          DEPLOY_PUBLIC_ORIGIN: https://banglaadventure.com
+          DEPLOY_APP_PORT: '3001'
           DEPLOY_HOST_FINGERPRINT: ${{ vars.DEPLOY_HOST_FINGERPRINT || 'SHA256:79xe+ubCodL2ACAHPNloo7I/K6mvngU88vEiFoEeWL8' }}
           DEPLOY_KEY_FINGERPRINT: ${{ vars.DEPLOY_KEY_FINGERPRINT || 'SHA256:y1+C6cvcfpJFmO8pfjyMSFERpd5BtcQyDf5SptZXVlQ' }}
           DEPLOY_DOCKER_HOST: ${{ vars.DEPLOY_DOCKER_HOST || (vars.DEPLOY_DOCKER_CONTEXT == '' && 'unix:///run/user/1002/docker.sock') || '' }}
           DEPLOY_DOCKER_CONTEXT: ${{ vars.DEPLOY_DOCKER_CONTEXT }}
           DEPLOY_REQUIRE_ROOTLESS: 'true'
-          DEPLOY_REQUIRE_PUBLIC_HEALTH: 'true'
-          PUBLIC_HEALTH_URL: ${{ vars.PUBLIC_HEALTH_URL }}
-          # Passed only with the address secret, which masks the address inside the line.
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_HOST != '' && vars.DEPLOY_KNOWN_HOSTS || '' }}
+          # The same pinned VPS host key is accepted at its newly confirmed address.
+          DEPLOY_REBIND_PINNED_HOST: 'true'
+          # A deliberate manual bootstrap still requires app, proxy and host-loopback health.
+          # All ordinary production deployments additionally require valid public HTTPS.
+          DEPLOY_REQUIRE_PUBLIC_HEALTH: ${{ inputs.deploy_loopback != true }}
+          PUBLIC_HEALTH_URL: ${{ inputs.deploy_loopback != true && vars.PUBLIC_HEALTH_URL || '' }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           # Optional narration settings for the server .env; an empty one leaves the server's value.
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
@@ -163,4 +173,6 @@ jobs:
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           IMAGE_REF: ${{ needs.container.outputs.image_ref }}
-        run: bash scripts/deploy.sh "${IMAGE_REF:?Missing verified image digest}"
+        run: |
+          echo "::add-mask::$DEPLOY_HOST"
+          bash scripts/deploy.sh "${IMAGE_REF:?Missing verified image digest}"
