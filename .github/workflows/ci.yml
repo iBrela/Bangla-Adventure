@@ -175,4 +175,26 @@ jobs:
           IMAGE_REF: ${{ needs.container.outputs.image_ref }}
         run: |
           echo "::add-mask::$DEPLOY_HOST"
+          if [ "${DEPLOY_USER:-ba_deploy}" != ba_deploy ]; then
+            echo '::error::DEPLOY_USER must match the confirmed VPS account.'
+            exit 1
+          fi
           bash scripts/deploy.sh "${IMAGE_REF:?Missing verified image digest}"
+      - name: Check public DNS and HTTPS for the Nginx handoff
+        if: steps.current.outputs.newest == 'true' && inputs.deploy_loopback == true
+        run: |
+          domain=banglaadventure.com
+          if timeout 15 getent ahostsv4 "$domain" | awk '{print $1}' | sort -u | grep -Fxq '169.40.116.23'; then
+            echo 'Public DNS resolves to the deployment VPS.'
+          else
+            echo '::notice::Public DNS did not resolve to the expected VPS from this runner.'
+          fi
+          response=$(mktemp)
+          trap 'rm -f "$response"' EXIT
+          if status=$(curl --proto '=https' --silent --show-error --connect-timeout 5 --max-time 15 \
+            --max-filesize 65536 --output "$response" --write-out '%{http_code}' "https://$domain/api/health") &&
+            [ "$status" = 200 ] && jq -e '.status == "ok"' "$response" >/dev/null; then
+            echo 'Public HTTPS and the application health endpoint passed.'
+          else
+            echo "::notice::Public HTTPS application health is unconfirmed (HTTP ${status:-000})."
+          fi

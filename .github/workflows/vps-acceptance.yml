@@ -85,15 +85,9 @@ jobs:
           node --check tests/staging/browser-role-acceptance.mjs
           node --check tests/staging/role-acceptance-scenario.mjs
           python3 -m unittest discover -s tests -p 'private_staging_*test.py' -v
-          node --import tsx --test tests/private-staging*.test.mjs
-          node <<'JS'
-          const f=require("node:fs"),y=require("js-yaml");
-          const x=y.load(f.readFileSync(".github/workflows/vps-acceptance.yml","utf8"));
-          if(x.jobs.acceptance.environment!=="production"||!x.jobs.acceptance.needs.includes("validate")||!x.jobs.acceptance.needs.includes("repository-settings"))throw Error("Missing pre-SSH gates");
-          const ci=y.load(f.readFileSync(".github/workflows/ci.yml","utf8"));
-          const deploy=ci.jobs.deploy.steps.filter(s=>s.env&&Object.hasOwn(s.env,"DEPLOY_REQUIRE_ROOTLESS"));
-          if(deploy.length!==1||deploy[0].env.DEPLOY_REQUIRE_ROOTLESS!=="true"||deploy[0].env.DEPLOY_REQUIRE_PUBLIC_HEALTH!=="true")throw Error("Fixed production rootless/public-health gates changed");
-          JS
+          # The Python workflow tests above check the staging environment and pre-SSH gates.
+          # Exercise the same production deployment gates that run in the main CI suite.
+          node --import tsx --test tests/private-staging*.test.mjs tests/vps-deploy.test.mjs
       - name: Run the exact four-role scenario against a fresh local production server before SSH
         env:
           NODE_NO_WARNINGS: '1'
