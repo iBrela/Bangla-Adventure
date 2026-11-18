@@ -727,7 +727,7 @@ test("the frontend sends narration settings ahead of the password on the dispatc
   const commands = f.calls().filter(call => call.command === "ssh").map(call => call.args.at(-1));
   assert.equal(commands.length, 4, "create the stage, upload two release files, dispatch");
   assert.equal(commands.some(command => command.includes("narration")), false, "nothing about the settings is uploaded into the stage");
-  assert.match(commands.at(-1), /^bash \S+\/\.deploy-stage\.Fixture123\/deploy-remote\.sh .* \/opt\/bangla-adventures\/\.deploy-stage\.Fixture123 4 '' ''$/);
+  assert.match(commands.at(-1), /^bash \S+\/\.deploy-stage\.Fixture123\/deploy-remote\.sh .* \/opt\/bangla-adventures\/\.deploy-stage\.Fixture123 4$/);
   assert.equal(readFileSync(input, "utf8"), Object.entries(narrationSettings).map(([name, value]) => `${name}=${value}\n`).join("") + "fixture-registry-password");
   quiet(f, result, narrationKey);
   assert.deepEqual(f.temporary(), [], "the local copy is removed");
@@ -740,9 +740,23 @@ test("empty narration settings send nothing, so the server keeps its own", t => 
   const f = fixture(t);
   const input = path.join(f.root, "dispatch-input");
   successful(f.frontend({ ...Object.fromEntries(Object.keys(narrationSettings).map(name => [name, ""])), REGISTRY_PASSWORD: "fixture-registry-password", MOCK_SSH_INPUT: input }));
-  assert.match(f.calls().filter(call => call.command === "ssh").at(-1).args.at(-1), / 0 '' ''$/);
+  assert.match(f.calls().filter(call => call.command === "ssh").at(-1).args.at(-1), / 0$/);
   assert.equal(readFileSync(input, "utf8"), "fixture-registry-password", "only the password is sent");
   assert.deepEqual(f.temporary(), []);
+});
+
+test("frontend appends production origin and port only when the complete production settings pair is supplied", t => {
+  const legacy = fixture(t);
+  successful(legacy.frontend());
+  assert.match(legacy.calls().filter(call => call.command === "ssh").at(-1).args.at(-1), / \/opt\/bangla-adventures\/\.deploy-stage\.Fixture123 0$/);
+  const production = fixture(t);
+  successful(production.frontend({ DEPLOY_PUBLIC_ORIGIN: "https://banglaadventure.com", DEPLOY_APP_PORT: "3001" }));
+  assert.match(production.calls().filter(call => call.command === "ssh").at(-1).args.at(-1), / 0 https:\/\/banglaadventure\.com 3001$/);
+  for (const partial of [{ DEPLOY_PUBLIC_ORIGIN: "https://banglaadventure.com" }, { DEPLOY_APP_PORT: "3001" }]) {
+    const rejected = fixture(t);
+    failed(rejected.frontend(partial));
+    assert.deepEqual(rejected.calls(), [], "an incomplete production setting pair is rejected before SSH");
+  }
 });
 
 test("invalid narration settings stop the frontend before any connection, with a message that hides the value", t => {

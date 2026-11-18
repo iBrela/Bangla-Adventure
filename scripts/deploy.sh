@@ -165,9 +165,13 @@ upload deploy-remote.sh scripts/deploy-remote.sh
 # The narration lines, then the registry password, reach the server on standard input, never on a
 # command line or in the stage, so a dispatch that fails leaves no secret behind. Only their count
 # is an argument. The remote script must now clean its stage, including on a refused deployment.
+production_arguments=""
+if [ -n "$production_origin" ]; then
+  production_arguments=" $(quoted "$production_origin") $(quoted "$production_port")"
+fi
 stage_dispatched=true
 { cat "$work/narration.env"; printf '%s' "${REGISTRY_PASSWORD:-}"; } | on_server "bash $(quoted "$stage/deploy-remote.sh") $(quoted "$image") \
 $(quoted "${REGISTRY_USER:-}") $(quoted "$backup") $(quoted "$health_timeout") \
 $(quoted "$docker_host") $(quoted "$docker_context") $(quoted "$require_rootless") \
 $(quoted "$health_url") $(quoted "$require_public_health") $(quoted "$folder") $(quoted "$stage") \
-$(quoted "$narration_lines") $(quoted "$production_origin") $(quoted "$production_port")"
+$(quoted "$narration_lines")$production_arguments"
