@@ -1,4 +1,4 @@
-# Single application instance behind an HTTPS reverse proxy on this host.
+# Single internal application instance behind a loopback TCP proxy and host HTTPS proxy.
 # Set PUBLIC_ORIGIN to the real https:// address before starting.
 # Keep the same Compose project name across upgrades to reuse its data volume.
 # Builds the image here by default; APP_IMAGE runs a published one instead (scripts/deploy-remote.sh
@@ -31,11 +31,28 @@ services:
       ELEVENLABS_MODEL_ID: ${ELEVENLABS_MODEL_ID:-}
       ELEVENLABS_DAILY_CHARACTER_LIMIT: ${ELEVENLABS_DAILY_CHARACTER_LIMIT:-}
       ELEVENLABS_ACCOUNT_DAILY_CHARACTER_LIMIT: ${ELEVENLABS_ACCOUNT_DAILY_CHARACTER_LIMIT:-}
-    ports:
-      # The prepared VPS sets APP_PORT=3001; preserve port 3000 for existing installs.
-      - "127.0.0.1:${APP_PORT:-3000}:3000"
     volumes:
       - bangla-data:/app/.data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+  proxy:
+    # The exact same tested image provides Node's TCP forwarding script, without app data.
+    image: ${APP_IMAGE:-bangla-adventures:local}
+    init: true
+    user: node
+    restart: unless-stopped
+    stop_grace_period: 10s
+    read_only: true
+    entrypoint: [node, /app/scripts/production-proxy.mjs]
+    command: []
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-3001}:3000"
+    # The image's HTTP health probe traverses this listener to the internal app.
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -1,5 +1,53 @@
 # Prepared client VPS
 
+## Confirmed domain and loopback production bootstrap (18 November 2026)
+
+The CI deployment target is now `169.40.116.23:22`, using `ba_deploy`,
+`/opt/bangla-adventures`, and rootless Docker at
+`unix:///run/user/1002/docker.sock`. The existing pinned SSH host key is still
+required: the deployment can add the confirmed new address as an alias for that
+same verified key, but never accepts an unverified replacement key.
+
+Production uses `compose.yaml`, project `bangla-adventures`, and its own persistent
+volume. The app has no host port. The production TCP proxy uses the same tested
+image and publishes `127.0.0.1:3001:3000`; only the app mounts the database/media
+volume. Private staging remains a separate project, volume and Unix socket.
+Its existing containers are staging, not the production deployment, and no
+staging data is migrated by this release.
+
+Run the existing **CI** workflow on `main`, selecting **deploy_loopback** for the
+first release before Faysal installs Nginx and HTTPS. This explicit manual run
+can deploy while the ordinary `DEPLOY_ENABLED` gate remains disabled. It still
+runs the full verification, browser and image checks, pins the published image
+digest, uses the protected `production` environment, and verifies rootless
+Docker. The deployment sets these public values in the private server `.env`,
+preserving other settings and restoring the previous settings if release fails:
+
+```dotenv
+PUBLIC_ORIGIN=https://banglaadventure.com
+APP_PORT=3001
+COMPOSE_PROJECT_NAME=bangla-adventures
+```
+
+Deployment verifies app and proxy health, resolves the actual loopback binding,
+requires HTTP 200 from `http://127.0.0.1:3001/api/health`, runs a successful HEAD
+request to `http://127.0.0.1:3001`, and prints container status and published ports.
+A successful loopback run means Nginx can forward to port 3001; it does not claim
+that public HTTPS or browser authentication is ready.
+
+The application uses its own password/session authentication. There are no OAuth
+provider callback URLs to update; `PUBLIC_ORIGIN` supplies the permitted production
+origin and redirects use same-origin relative paths. Production cookies require
+HTTPS. After Faysal configures the domain, Nginx and certificates, run CI without
+**deploy_loopback** and with `DEPLOY_ENABLED=true` to require public HTTPS health,
+then verify actual sign-in. Operations/status workflows retain their separate
+secret-based connection settings; update their host secrets to the same confirmed
+VPS before enabling scheduled production operations.
+
+The remainder describes the original prepared configuration. The confirmed domain,
+production proxy topology and explicit bootstrap above supersede its earlier
+domain-pending and direct-app-port descriptions.
+
 This configuration follows Faysal's 5 November 2026 handover. It is prepared for
 review; creating these files does not connect to the VPS, transfer the repository,
 configure GitHub Secrets, or enable deployment.

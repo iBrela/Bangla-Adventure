@@ -235,6 +235,27 @@ for server_command in admin:grant admin:reset-password; do
 done
 passed "non-root startup, fresh SQLite schema, backup utility and server commands"
 
+# Exercise the proxy packaged in this exact image against the healthy app. Its temporary
+# listener lives only inside this disposable container; no host port is published.
+docker exec --user node -i "$container_id" node --input-type=module - <<'NODE'
+import assert from 'node:assert/strict';
+import { startProductionProxy } from './scripts/production-proxy.mjs';
+const proxy = await startProductionProxy({
+  listenHost: '127.0.0.1', listenPort: 0,
+  targetHost: '127.0.0.1', targetPort: Number(process.env.PORT || 3000),
+});
+try {
+  const response = await fetch(`http://127.0.0.1:${proxy.server.address().port}/api/health`, {
+    headers: { Connection: 'close' }, signal: AbortSignal.timeout(15000),
+  });
+  assert.equal(response.status, 200, 'packaged production proxy must forward app health');
+  await response.arrayBuffer();
+} finally {
+  await proxy.close();
+}
+NODE
+passed "packaged production proxy forwards real HTTP to the healthy application"
+
 # Recreate the container, not just its process, to prove persistence is provided
 # by the named volume rather than the disposable writable container layer.
 stop_container

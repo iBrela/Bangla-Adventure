@@ -4,6 +4,7 @@
 #   bash deploy-remote.sh IMAGE [REGISTRY_USER] [BACKUP=1] [HEALTH_TIMEOUT=180]
 #     [DOCKER_HOST] [DOCKER_CONTEXT] [REQUIRE_ROOTLESS=true] [PUBLIC_HEALTH_URL]
 #     [REQUIRE_PUBLIC_HEALTH=false] [DEPLOYMENT_DIRECTORY] [STAGING_DIRECTORY] [NARRATION_LINES=0]
+#     [PRODUCTION_ORIGIN] [PRODUCTION_PORT]
 #
 # With REGISTRY_USER, the registry password is read from standard input. The folder holds
 # compose.yaml and an operator-managed .env (PUBLIC_ORIGIN, optionally APP_PORT); this script
@@ -31,6 +32,8 @@ script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 deployment_directory="${10:-$script_directory}"
 staging_directory="${11:-}"
 narration_lines="${12:-0}"
+production_origin="${13:-}"
+production_port="${14:-}"
 cd "$deployment_directory"
 deployment_directory="$PWD"
 # Only .env decides these: a value left in the operator's shell must not override it.
@@ -49,6 +52,7 @@ had_script=false
 narration_names=()
 narration_values=()
 saved_env=false
+had_env=true
 env_temporary=""
 # Staging belongs only to this invocation. Never clean a caller-selected unrelated directory.
 if [ -n "$staging_directory" ]; then
@@ -99,7 +103,11 @@ write_narration() {
 # Puts back the .env saved before the narration settings changed it.
 restore_settings() {
   [ "$saved_env" = true ] || return 0
-  cp -p "$snapshot/.env" .env.restore && mv -f .env.restore .env
+  if [ "$had_env" = true ]; then
+    cp -p "$snapshot/.env" .env.restore && mv -f .env.restore .env
+  else
+    rm -f .env
+  fi
 }
 # Adds NAME=VALUE to .env on a line of its own, also when the file's last line has no newline.
 add_setting() {
@@ -122,8 +130,19 @@ public_healthy() {
     --max-time 20 --retry 2 --retry-delay 2 --retry-max-time "$timeout" \
     --output /dev/null --write-out '%{http_code}' "$health_url")" && [ "$status" = 200 ]
 }
+loopback_healthy() {
+  local binding local_port status
+  binding="$(docker compose port proxy 3000 2>/dev/null)" || binding=""
+  if [ -z "$binding" ]; then binding="$(docker compose port app 3000 2>/dev/null)" || return 1; fi
+  [[ "$binding" =~ ^127\.0\.0\.1:([0-9]{1,5})$ ]] || return 1
+  local_port="${BASH_REMATCH[1]}"
+  ((10#$local_port > 0 && 10#$local_port <= 65535)) || return 1
+  status="$(curl --noproxy '*' --silent --show-error --fail --connect-timeout 5 --max-time 20 \
+    --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$local_port/api/health")" && [ "$status" = 200 ] || return 1
+  curl --noproxy '*' --head --silent --show-error --fail --connect-timeout 5 --max-time 20 "http://127.0.0.1:$local_port"
+}
 start() {
-  docker compose up --detach --no-build --wait --wait-timeout "$timeout" app && healthy && public_healthy
+  docker compose up --detach --no-build --remove-orphans --wait --wait-timeout "$timeout" && healthy && loopback_healthy && public_healthy
 }
 restore_configuration() {
   local artifact existed
@@ -146,9 +165,11 @@ rollback_release() {
     }
   else
     # A failed first release has no known-good image/configuration to restart.
-    if [ -f compose.yaml ]; then docker compose stop app || return 1; fi
+    # Remove its containers before removing their Compose configuration, so a retry does
+    # not find orphaned stopped services. Keep named volumes and their data for recovery.
+    if [ -f compose.yaml ]; then docker compose down || return 1; fi
     restore_configuration || return 1
-    if [ -n "$original_image" ]; then set_setting APP_IMAGE "$original_image"; else sed -i '/^APP_IMAGE=/d' .env; fi || {
+    if [ -n "$original_image" ]; then set_setting APP_IMAGE "$original_image"; elif [ -f .env ]; then sed -i '/^APP_IMAGE=/d' .env; fi || {
       say 'could not restore APP_IMAGE in the server settings; operator intervention is required.' >&2
       return 1
     }
@@ -189,6 +210,10 @@ trap 'exit 143' TERM
 [[ "$require_rootless" = true || "$require_rootless" = false ]] || fail 'REQUIRE_ROOTLESS must be true or false.'
 [[ "$require_public_health" = true || "$require_public_health" = false ]] || fail 'REQUIRE_PUBLIC_HEALTH must be true or false.'
 [[ "$narration_lines" =~ ^[0-4]$ ]] || fail 'NARRATION_LINES must be 0 to 4.'
+if [ -n "$production_origin$production_port" ]; then
+  [[ "$production_origin" =~ ^https://[a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]{1,5})?$ ]] || fail 'invalid production HTTPS origin.'
+  [[ "$production_port" =~ ^[0-9]{1,5}$ ]] && ((10#$production_port > 0 && 10#$production_port <= 65535)) || fail 'invalid production TCP port.'
+fi
 [ -z "$docker_host" ] || [ -z "$docker_context" ] || fail 'select a Docker socket or context, not both.'
 [ -z "$docker_host" ] || [[ "$docker_host" =~ ^unix:///[-a-zA-Z0-9_./]+$ ]] || fail 'Docker host must be an explicit local Unix socket.'
 [ -z "$docker_context" ] || [[ "$docker_context" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || fail 'invalid Docker context.'
@@ -215,6 +240,21 @@ case "$(docker compose up --help 2>&1)" in
   *--wait-timeout*) ;;
   *) fail "the server needs Docker Compose 2.17 or later (docker compose version)." ;;
 esac
+command -v curl >/dev/null 2>&1 || fail 'curl is required for the loopback health check.'
+if [ -n "$production_origin" ]; then
+  [ ! -L .env ] || fail 'the production settings must not be a symlink.'
+  if [ -f .env ]; then
+    project="$(setting COMPOSE_PROJECT_NAME)"
+    [ -z "$project" ] || [ "$project" = bangla-adventures ] || fail 'refusing to change the data project of an existing deployment.'
+  fi
+  snapshot="$(mktemp -d "$PWD/.deploy-transaction.XXXXXXXXXX")"
+  if [ -f .env ]; then cp -p .env "$snapshot/.env"; else had_env=false; (umask 077; touch .env); fi
+  saved_env=true
+  set_setting PUBLIC_ORIGIN "$production_origin"
+  set_setting APP_PORT "$production_port"
+  set_setting COMPOSE_PROJECT_NAME bangla-adventures
+  chmod 600 .env
+fi
 if [ ! -f .env ] || ! grep -q '^PUBLIC_ORIGIN=.' .env; then
   fail "create $PWD/.env with PUBLIC_ORIGIN=https://<the site's address> first (docs/DEPLOYMENT.md)."
 fi
@@ -252,9 +292,8 @@ grep -q '^COMPOSE_PROJECT_NAME=' .env || add_setting COMPOSE_PROJECT_NAME bangla
 # Narration settings change .env only after a private copy is saved, so Compose validates and starts
 # with them. Every failure before the release is committed puts that copy back.
 if [ "${#narration_names[@]}" -gt 0 ]; then
-  snapshot="$(mktemp -d "$PWD/.deploy-transaction.XXXXXXXXXX")"
-  cp -p .env "$snapshot/.env"
-  saved_env=true
+  [ -n "$snapshot" ] || snapshot="$(mktemp -d "$PWD/.deploy-transaction.XXXXXXXXXX")"
+  if [ "$saved_env" != true ]; then cp -p .env "$snapshot/.env"; saved_env=true; fi
   say "updating ${narration_names[*]} in .env"
   write_narration || fail 'could not update the narration settings in .env.'
 fi
@@ -342,6 +381,7 @@ fi
 set_setting APP_IMAGE "$image"
 say "starting $image"
 if start; then
+  docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image" >> deployments.log
   committed=true
   # Keep this image and the previous one; remove older ones of the same name to save disk space.

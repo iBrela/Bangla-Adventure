@@ -221,6 +221,7 @@ safe direction; a lasting one would show as `monitor-report-stale`.
 | --- | --- |
 | `http://127.0.0.1:APP_PORT/api/health` answers `200` | `health-unavailable` |
 | The app container is running, and Docker reports it healthy | `app-not-running`, `app-unhealthy` |
+| The production TCP proxy is running and healthy with the current image | `proxy-not-running`, `proxy-unhealthy`, `proxy-image-mismatch` |
 | It runs the image named by `APP_IMAGE` in `.env` | `app-image-mismatch` |
 | Nothing in the project publishes a port except the app on `127.0.0.1:APP_PORT` | `port-exposed` |
 | At least 1 GiB free on the deployment filesystem (the staging threshold) | `disk-low` |

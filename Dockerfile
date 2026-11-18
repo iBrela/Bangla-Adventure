@@ -30,6 +30,7 @@ COPY --from=builder /app/db ./db
 COPY --from=builder /app/app ./app
 COPY --from=builder /app/scripts/grant-admin.ts /app/scripts/reset-password.ts ./scripts/
 COPY --from=builder /app/scripts/reconcile-demo.ts ./scripts/
+COPY --from=builder /app/scripts/production-proxy.mjs ./scripts/
 COPY --from=builder /app/scripts/backup_restore.py /app/scripts/backup.sh /app/scripts/restore.sh /app/scripts/docker-start.sh /app/scripts/close-idle-on-shutdown.mjs ./scripts/
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 

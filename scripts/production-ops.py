@@ -405,9 +405,21 @@ class Production:
 
     @staticmethod
     def app(found: list[dict]) -> dict | None:
-        apps = [c for c in found if ((c.get("Config") or {}).get("Labels") or {}).get("com.docker.compose.service") == "app"
-                and ((c.get("Config") or {}).get("Labels") or {}).get("com.docker.compose.oneoff") != "True"]
+        apps = project_services(found, "app")
         return apps[0] if len(apps) == 1 else None
+
+    @staticmethod
+    def proxy(found: list[dict]) -> dict | None:
+        proxies = project_services(found, "proxy")
+        return proxies[0] if len(proxies) == 1 else None
+
+    def deployment_state(self, found: list[dict]) -> tuple[bool, bool]:
+        """Both application and ingress must serve; older app-only deployments still work."""
+        running, healthy = self.serving_state(self.app(found))
+        if proxy_required(found):
+            proxy_running, proxy_healthy = self.serving_state(self.proxy(found))
+            running, healthy = running and proxy_running, healthy and proxy_healthy
+        return running, healthy
 
     @staticmethod
     def serving_state(app: dict | None) -> tuple[bool, bool]:
@@ -441,7 +453,7 @@ class Production:
     def wait_until_healthy(self, cfg: dict, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         while True:
-            if self.serving_state(self.app(self.containers(cfg)))[1]:
+            if self.deployment_state(self.containers(cfg))[1]:
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -463,9 +475,13 @@ class Production:
     def wait_until_serving(self, cfg: dict, timeout: float) -> dict:
         deadline = time.monotonic() + timeout
         while True:
-            app = self.app(self.containers(cfg))
+            found = self.containers(cfg)
+            app = self.app(found)
             require(app is None or (app.get("Config") or {}).get("Image") == cfg["image"], "app-image-mismatch")
-            running, healthy = self.serving_state(app)
+            if proxy_required(found):
+                proxy = self.proxy(found)
+                require(proxy is None or (proxy.get("Config") or {}).get("Image") == cfg["image"], "proxy-image-mismatch")
+            running, healthy = self.deployment_state(found)
             if healthy and self.loopback_health(cfg["port"]):
                 return app
             if time.monotonic() >= deadline:
@@ -704,6 +720,8 @@ class Production:
             found = self.containers(cfg)
             app = self.app(found)
             running, healthy = self.serving_state(app)
+            proxy = self.proxy(found)
+            proxy_running, proxy_healthy = self.serving_state(proxy)
             try:
                 latest = self.receipt(cfg, verify=False)
             except (Refused, ValueError, KeyError):
@@ -718,6 +736,9 @@ class Production:
                 "checkedAtEpoch": time.time(), "loopbackHealth": self.loopback_health(cfg["port"]),
                 "appRunning": running, "appHealthy": healthy,
                 "appImageCurrent": app is not None and (app.get("Config") or {}).get("Image") == cfg["image"],
+                "proxy": {"running": proxy_running, "healthy": proxy_healthy,
+                          "imageCurrent": proxy is not None and (proxy.get("Config") or {}).get("Image") == cfg["image"]}
+                         if proxy_required(found) else None,
                 "portsConfined": ports_confined(found, cfg["port"]), "freeDiskBytes": self.free_bytes(),
                 "backup": {"present": latest["present"], "createdEpoch": latest.get("createdEpoch")},
                 "lastBackupRunPassed": bool(last) and last.get("status") == "passed",
@@ -991,9 +1012,25 @@ def snapshot_matches(stdout: str, snapshot: str, target: str) -> bool:
             and value[0].get("paths") == [target] and value[0].get("hostname") == RESTIC_HOST and RESTIC_TAG in (value[0].get("tags") or []))
 
 
+def project_services(found: list[dict], service: str) -> list[dict]:
+    """Ignore Compose's short-lived one-off helpers when finding a serving service."""
+    return [c for c in found if ((c.get("Config") or {}).get("Labels") or {}).get("com.docker.compose.service") == service
+            and ((c.get("Config") or {}).get("Labels") or {}).get("com.docker.compose.oneoff") != "True"]
+
+
+def proxy_required(found: list[dict]) -> bool:
+    """An internal app needs ingress even when its proxy is missing or stopped."""
+    return bool(project_services(found, "proxy")) or any(
+        not any(((app.get("HostConfig") or {}).get("PortBindings") or {}).values())
+        for app in project_services(found, "app"))
+
+
 def ports_confined(found: list[dict], port: int) -> bool:
-    """Nothing in the project publishes a port except the app on 127.0.0.1:APP_PORT."""
+    """Only ingress publishes 127.0.0.1:APP_PORT: proxy, or the legacy app-only service."""
     expected = {"3000/tcp": [("127.0.0.1", str(port))]}
+    ingress = "proxy" if proxy_required(found) else "app"
+    if len(project_services(found, "app")) != 1 or (ingress == "proxy" and len(project_services(found, "proxy")) != 1):
+        return False
 
     def bindings(table) -> dict:
         if not isinstance(table, dict):
@@ -1003,7 +1040,7 @@ def ports_confined(found: list[dict], port: int) -> bool:
     for container in found:
         host = container.get("HostConfig") or {}
         labels = (container.get("Config") or {}).get("Labels") or {}
-        allowed = expected if labels.get("com.docker.compose.service") == "app" and labels.get("com.docker.compose.oneoff") != "True" else {}
+        allowed = expected if labels.get("com.docker.compose.service") == ingress and labels.get("com.docker.compose.oneoff") != "True" else {}
         if host.get("NetworkMode") == "host" or host.get("PublishAllPorts"):
             return False
         if bindings(host.get("PortBindings") or {}) != allowed:
@@ -1019,6 +1056,7 @@ MONITOR_CODES = {
     "backupPresent": "backup-missing", "backupFresh": "backup-stale-or-future", "lastBackupRunPassed": "backup-job-failed",
     "backupLockClear": "stale-backup-lock-found", "publicHealth": "public-health-failed",
     "certificateValid": "certificate-expiring-or-invalid", "offsiteFresh": "offsite-stale",
+    "proxyRunning": "proxy-not-running", "proxyHealthy": "proxy-unhealthy", "proxyImageCurrent": "proxy-image-mismatch",
 }
 
 
@@ -1026,7 +1064,7 @@ def evaluate_monitor(facts: dict) -> dict:
     """Pure checks over bounded facts; None marks a check that does not apply."""
     expected = {"checkedAtEpoch", "loopbackHealth", "appRunning", "appHealthy", "appImageCurrent", "portsConfined",
                 "freeDiskBytes", "backup", "lastBackupRunPassed", "backupLockPresent", "public", "offsite"}
-    if not isinstance(facts, dict) or set(facts) != expected:
+    if not isinstance(facts, dict) or set(facts) not in (expected, expected | {"proxy"}):
         raise ValueError("Invalid monitor facts")
     for name in ("loopbackHealth", "appRunning", "appHealthy", "appImageCurrent", "portsConfined", "lastBackupRunPassed", "backupLockPresent"):
         if type(facts[name]) is not bool:
@@ -1044,6 +1082,10 @@ def evaluate_monitor(facts: dict) -> dict:
         return value is not None and -FUTURE_SKEW <= now - value <= limit
 
     backup, public, offsite = facts["backup"], facts["public"], facts["offsite"]
+    proxy = facts.get("proxy")
+    if proxy is not None and (not isinstance(proxy, dict) or set(proxy) != {"running", "healthy", "imageCurrent"}
+                              or any(type(value) is not bool for value in proxy.values())):
+        raise ValueError("Invalid proxy facts")
     if not isinstance(backup, dict) or set(backup) != {"present", "createdEpoch"} or type(backup["present"]) is not bool:
         raise ValueError("Invalid backup facts")
     created = epoch(backup["createdEpoch"])
@@ -1063,6 +1105,8 @@ def evaluate_monitor(facts: dict) -> dict:
         "certificateValid": None if public is None else expires is not None and expires - now >= MIN_CERTIFICATE_SECONDS,
         "offsiteFresh": None if offsite is None else within(copied, MAX_OFFSITE_AGE),
     }
+    if proxy is not None:
+        checks.update(proxyRunning=proxy["running"], proxyHealthy=proxy["healthy"], proxyImageCurrent=proxy["imageCurrent"])
     failures = [MONITOR_CODES[name] for name, passed in checks.items() if passed is False]
     return {
         "scope": SCOPE, "action": "monitor", "verified": not failures, "status": "healthy" if not failures else "failed",

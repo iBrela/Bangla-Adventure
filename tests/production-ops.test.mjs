@@ -104,7 +104,7 @@ test('both production workflows are gated on an enabled production deployment on
     'vps-offsite-rehearsal.yml', 'vps-production-ops.yml', 'vps-production-status.yml']) {
     const lines = read(`.github/workflows/${name}`).split('\n').filter((line) => /^\s+DEPLOY_KNOWN_HOSTS:/.test(line));
     assert.ok(lines.length > 0, name);
-    for (const line of lines) assert.equal(line.trim(), `DEPLOY_KNOWN_HOSTS: ${guarded}`, name);
+    for (const line of lines) assert.equal(line.trim(), name === 'ci.yml' ? 'DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}' : `DEPLOY_KNOWN_HOSTS: ${guarded}`, name);
   }
   for (const name of ['vps-production-ops.yml', 'vps-production-status.yml', '../../scripts/production-ops-controller.sh']) {
     const text = read(`.github/workflows/${name}`);

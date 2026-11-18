@@ -12,7 +12,7 @@ if [ "${DEPLOY_ENABLED:-false}" != true ]; then
 fi
 image="${1:?usage: scripts/deploy.sh IMAGE}"
 : "${DEPLOY_HOST:?Set DEPLOY_HOST to the server to deploy to.}"
-user="${DEPLOY_USER:-deploy}"
+user="${DEPLOY_USER:-ba_deploy}"
 port="${DEPLOY_PORT:-22}"
 folder="${DEPLOY_PATH:-/opt/bangla-adventures}"
 host_fingerprint="${DEPLOY_HOST_FINGERPRINT:-SHA256:79xe+ubCodL2ACAHPNloo7I/K6mvngU88vEiFoEeWL8}"
@@ -24,6 +24,8 @@ require_public_health="${DEPLOY_REQUIRE_PUBLIC_HEALTH:-false}"
 health_url="${PUBLIC_HEALTH_URL:-}"
 backup="${DEPLOY_BACKUP:-1}"
 health_timeout="${DEPLOY_HEALTH_TIMEOUT:-180}"
+production_origin="${DEPLOY_PUBLIC_ORIGIN:-}"
+production_port="${DEPLOY_APP_PORT:-}"
 fail() { printf 'deploy: %s\n' "$*" >&2; exit 1; }
 [[ "$image" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/@:-]*$ ]] || fail 'invalid image reference.'
 [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.:-]*$ ]] || fail 'invalid deploy host.'
@@ -36,6 +38,10 @@ fail() { printf 'deploy: %s\n' "$*" >&2; exit 1; }
 [[ "$health_timeout" =~ ^[1-9][0-9]{0,4}$ ]] || fail 'DEPLOY_HEALTH_TIMEOUT must be positive seconds.'
 [[ "$require_rootless" = true || "$require_rootless" = false ]] || fail 'DEPLOY_REQUIRE_ROOTLESS must be true or false.'
 [[ "$require_public_health" = true || "$require_public_health" = false ]] || fail 'DEPLOY_REQUIRE_PUBLIC_HEALTH must be true or false.'
+if [ -n "$production_origin$production_port" ]; then
+  [[ "$production_origin" =~ ^https://[a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]{1,5})?$ ]] || fail 'DEPLOY_PUBLIC_ORIGIN must be an HTTPS origin without a path.'
+  [[ "$production_port" =~ ^[0-9]{1,5}$ ]] && ((10#$production_port > 0 && 10#$production_port <= 65535)) || fail 'DEPLOY_APP_PORT must be a valid TCP port.'
+fi
 [ -z "$docker_host" ] || [ -z "$docker_context" ] || fail 'select DEPLOY_DOCKER_HOST or DEPLOY_DOCKER_CONTEXT, not both.'
 [ -z "$docker_host" ] || [[ "$docker_host" =~ ^unix:///[-a-zA-Z0-9_./]+$ ]] || fail 'DEPLOY_DOCKER_HOST must be an explicit local Unix socket.'
 [ -z "$docker_context" ] || [[ "$docker_context" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || fail 'invalid Docker context.'
@@ -129,6 +135,13 @@ done < "$work/provided_hosts"
 [ -s "$work/known_hosts" ] || fail 'no verified host key was provided.'
 lookup="$DEPLOY_HOST"
 [ "$port" = 22 ] || lookup="[$DEPLOY_HOST]:$port"
+if [ "${DEPLOY_REBIND_PINNED_HOST:-false}" = true ]; then
+  # Every supplied key above was independently pinned. Add only the requested target's alias;
+  # StrictHostKeyChecking still requires the new address to prove possession of that exact key.
+  while IFS=$' \t' read -r _ key_type key_data _; do
+    printf '%s %s %s\n' "$lookup" "$key_type" "$key_data" >> "$work/known_hosts"
+  done < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$work/provided_hosts")
+fi
 ssh-keygen -F "$lookup" -f "$work/known_hosts" >/dev/null 2>&1 || fail 'the verified known_hosts entries do not cover the deploy host and port.'
 ssh_options=(-F /dev/null -i "$key" -p "$port" -o BatchMode=yes -o IdentitiesOnly=yes
   -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o GlobalKnownHostsFile=/dev/null
@@ -157,4 +170,4 @@ stage_dispatched=true
 $(quoted "${REGISTRY_USER:-}") $(quoted "$backup") $(quoted "$health_timeout") \
 $(quoted "$docker_host") $(quoted "$docker_context") $(quoted "$require_rootless") \
 $(quoted "$health_url") $(quoted "$require_public_health") $(quoted "$folder") $(quoted "$stage") \
-$(quoted "$narration_lines")"
+$(quoted "$narration_lines") $(quoted "$production_origin") $(quoted "$production_port")"

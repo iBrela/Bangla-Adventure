@@ -81,8 +81,9 @@ if (command === 'git') {
   }
 }
 if (command === 'curl') {
-  if (env.MOCK_PUBLIC_HEALTH_FAIL === appImage) done(22);
-  out(env.MOCK_PUBLIC_HEALTH_STATUS && appImage === env.MOCK_CANDIDATE_IMAGE ? env.MOCK_PUBLIC_HEALTH_STATUS : '200'); done();
+  const external = args.some(arg => arg.startsWith('https://'));
+  if ((external && env.MOCK_PUBLIC_HEALTH_FAIL === appImage) || (!external && env.MOCK_LOOPBACK_HEALTH_FAIL === appImage)) done(22);
+  out(external && env.MOCK_PUBLIC_HEALTH_STATUS && appImage === env.MOCK_CANDIDATE_IMAGE ? env.MOCK_PUBLIC_HEALTH_STATUS : '200'); done();
 }
 if (command === 'sleep') done();
 if (command === 'publish-effect' || command === 'deploy-effect' || command === 'apk') done();
@@ -90,12 +91,22 @@ if (command === 'gcloud') { out('fictional-test-token'); done(); }
 if (command === 'cat' && args.length === 1 && args[0] === '/registry/token') { out('fictional-test-token'); done(); }
 if (command === 'id') { if (args[0] === '-u') out('1007'); else out('deploy-fixture'); done(); }
 if (command === 'docker') {
+  if (args[0] === 'ps') { out('fixture-app healthy; fixture-proxy healthy 127.0.0.1:3001->3000/tcp'); done(); }
   if (args[0] === 'info') { if (env.MOCK_DOCKER_INFO_FAIL) done(1); out(env.MOCK_DOCKER_ROOTLESS === 'false' ? '["name=seccomp"]' : '["name=seccomp","name=rootless"]'); done(); }
   if (args[0] === 'context' && args[1] === 'inspect') { out(env.MOCK_CONTEXT_HOST || 'unix:///run/user/1007/docker.sock'); done(); }
   if (args[0] === 'context' && args[1] === 'show') { out('unexpected-default-context'); done(); }
   if (args[0] === 'compose') {
+    if (args[1] === 'port') {
+      if (args[2] === 'proxy' && !entry.compose.includes('  proxy:')) done(1);
+      const port = /^APP_PORT=["']?(\d+)/m.exec(dotenv)?.[1] || '3000';
+      out('127.0.0.1:' + port); done();
+    }
     if (args.includes('config')) done(Number(env.MOCK_INVALID_COMPOSE || 0));
-    if (args.includes('ps')) { if (!env.MOCK_NO_CONTAINER) out('existing-app-container'); done(); }
+    if (args.includes('ps')) {
+      const present = env.MOCK_CONTAINER_STATE ? fs.existsSync(env.MOCK_CONTAINER_STATE) : !env.MOCK_NO_CONTAINER;
+      if (present) out('existing-app-container');
+      done();
+    }
     if (args[1] === 'run') {
       if (args.includes('scripts/backup.sh')) done(Number(env.MOCK_BACKUP_FAIL || 0));
       if (env.MOCK_NO_DATABASE) out('none');
@@ -103,6 +114,12 @@ if (command === 'docker') {
     }
     if (args[1] === 'version') { out('Docker Compose version v2.30.0'); done(); }
     if (args[1] === 'up' && args.includes('--help')) { out('--wait --wait-timeout'); done(); }
+    if (args[1] === 'up' && env.MOCK_CONTAINER_STATE) fs.writeFileSync(env.MOCK_CONTAINER_STATE, 'candidate services created');
+    if (args[1] === 'down') {
+      if (env.MOCK_CONTAINER_STATE) fs.rmSync(env.MOCK_CONTAINER_STATE, { force: true });
+      if (args.includes('--volumes') && env.MOCK_DATA_FILE) fs.rmSync(env.MOCK_DATA_FILE, { force: true });
+      done();
+    }
     if (args[1] === 'ps') { out('existing-app-container'); done(); }
     if (args[1] === 'up' || args[1] === 'exec' || args[1] === 'logs' || args[1] === 'stop' || args[1] === 'start') done();
   }
@@ -155,9 +172,9 @@ function fixture(t) {
   };
   const frontend = (changes = {}, args = [image]) => run("scripts/deploy.sh", args, { ...frontEnv, ...changes });
   // Narration lines come first on standard input, then the registry password; only their count is an argument.
-  const remote = ({ host = rootlessHost, context = "", rootless = "true", health = "https://demo.example.invalid/api/health", requireHealth = "true", registryUser = "", backup = "0", stage = "", narration = "", lines = narration.split("\n").length - 1, env: changes = {} } = {}) => {
-    const locations = stage || narration || lines ? [path.join(root, "remote"), stage] : [];
-    return run(stage ? path.relative(root, path.join(stage, "deploy-remote.sh")) : "remote/deploy-remote.sh", [image, registryUser, backup, "1", host, context, rootless, health, requireHealth, ...locations, ...(narration || lines ? [String(lines)] : [])], changes, narration + (registryUser ? "fixture-registry-password" : ""));
+  const remote = ({ host = rootlessHost, context = "", rootless = "true", health = "https://demo.example.invalid/api/health", requireHealth = "true", registryUser = "", backup = "0", stage = "", narration = "", lines = narration.split("\n").length - 1, origin = "", port = "", env: changes = {} } = {}) => {
+    const locations = stage || narration || lines || origin || port ? [path.join(root, "remote"), stage] : [];
+    return run(stage ? path.relative(root, path.join(stage, "deploy-remote.sh")) : "remote/deploy-remote.sh", [image, registryUser, backup, "1", host, context, rootless, health, requireHealth, ...locations, ...(narration || lines || origin || port ? [String(lines), origin, port] : [])], changes, narration + (registryUser ? "fixture-registry-password" : ""));
   };
   const stage = (label = "candidate") => {
     const directory = mkdtempSync(path.join(root, "remote", ".deploy-stage."));
@@ -171,6 +188,88 @@ function fixture(t) {
 const successful = result => assert.equal(result.status, 0, result.stderr + result.stdout);
 const failed = result => assert.notEqual(result.status, 0, result.stderr + result.stdout);
 const dockerCalls = f => f.calls().filter(call => call.command === "docker");
+
+test("a pinned VPS host key can be explicitly rebound to the server's confirmed new address", t => {
+  const rejected = fixture(t);
+  failed(rejected.frontend({ DEPLOY_HOST: "new-vps.example.invalid" }));
+  assert.equal(rejected.calls().some(call => call.command === "ssh"), false);
+  const accepted = fixture(t);
+  successful(accepted.frontend({ DEPLOY_HOST: "new-vps.example.invalid", DEPLOY_REBIND_PINNED_HOST: "true" }));
+  assert.ok(accepted.calls().some(call => call.command === "ssh" && call.args.includes("fixture-deploy@new-vps.example.invalid")));
+  const mismatched = fixture(t);
+  failed(mismatched.frontend({ DEPLOY_HOST: "new-vps.example.invalid", DEPLOY_REBIND_PINNED_HOST: "true", DEPLOY_HOST_FINGERPRINT: `SHA256:${"D".repeat(43)}` }));
+  assert.equal(mismatched.calls().some(call => call.command === "ssh"), false);
+});
+
+test("first production bootstrap creates private settings and verifies host loopback before HTTPS exists", t => {
+  const f = fixture(t);
+  const directory = path.join(f.root, "remote");
+  rmSync(path.join(directory, ".env"));
+  rmSync(path.join(directory, "compose.yaml"));
+  const stage = f.stage();
+  successful(f.remote({ stage, origin: "https://banglaadventure.com", port: "3001", health: "", requireHealth: "false", env: { MOCK_NO_CONTAINER: "1" } }));
+  const settings = readFileSync(path.join(directory, ".env"), "utf8");
+  assert.match(settings, /^PUBLIC_ORIGIN=https:\/\/banglaadventure.com$/m);
+  assert.match(settings, /^APP_PORT=3001$/m);
+  assert.match(settings, /^COMPOSE_PROJECT_NAME=bangla-adventures$/m);
+  assert.equal(statSync(path.join(directory, ".env")).mode & 0o777, 0o600);
+  const requests = f.calls().filter(call => call.command === "curl");
+  assert.ok(requests.some(call => call.args.includes("http://127.0.0.1:3001/api/health")));
+  assert.ok(requests.some(call => call.args.includes("--head") && call.args.includes("http://127.0.0.1:3001")));
+  assert.equal(requests.some(call => call.args.some(arg => arg.startsWith("https://"))), false);
+  assert.ok(dockerCalls(f).some(call => call.args[0] === "ps"));
+  const start = dockerCalls(f).find(call => call.args[1] === "up" && !call.args.includes("--help"));
+  assert.ok(start.args.includes("--remove-orphans"));
+  assert.equal(start.args.includes("app"), false, "the full production composition starts, including proxy");
+});
+
+test("failed first loopback verification preserves data and permits a clean bootstrap retry", t => {
+  const f = fixture(t);
+  const directory = path.join(f.root, "remote");
+  rmSync(path.join(directory, ".env"));
+  rmSync(path.join(directory, "compose.yaml"));
+  rmSync(path.join(directory, "deploy-remote.sh"));
+  const containerState = path.join(f.root, "production-containers");
+  const dataFile = path.join(f.root, "production-volume-data");
+  writeFileSync(dataFile, "preserve production data for recovery");
+  const state = { MOCK_CONTAINER_STATE: containerState, MOCK_DATA_FILE: dataFile };
+  const bootstrap = { origin: "https://banglaadventure.com", port: "3001", health: "", requireHealth: "false" };
+  failed(f.remote({ ...bootstrap, stage: f.stage(), env: { ...state, MOCK_LOOPBACK_HEALTH_FAIL: image } }));
+  assert.equal(existsSync(path.join(directory, ".env")), false);
+  assert.equal(existsSync(path.join(directory, "compose.yaml")), false);
+  assert.equal(existsSync(path.join(directory, "deployments.log")), false);
+  const teardown = dockerCalls(f).find(call => call.args[1] === "down");
+  assert.deepEqual(teardown?.args, ["compose", "down"], "first-release cleanup removes containers without deleting volumes");
+  assert.equal(teardown.project, "bangla-adventures", "only this production project is removed");
+  assert.equal(existsSync(containerState), false, "no stopped app remains to block a retry");
+  assert.equal(readFileSync(dataFile, "utf8"), "preserve production data for recovery");
+  successful(f.remote({ ...bootstrap, stage: f.stage(), env: state }));
+  assert.equal(f.currentImage(), image);
+  assert.equal(existsSync(containerState), true, "the retry created the healthy production services");
+  assert.equal(readFileSync(dataFile, "utf8"), "preserve production data for recovery");
+});
+
+test("failed production settings update restores the old origin, secrets and effective legacy port", t => {
+  const f = fixture(t);
+  const directory = path.join(f.root, "remote");
+  const original = `PUBLIC_ORIGIN=https://old.example.invalid\nAPP_IMAGE=${previous}\nCOMPOSE_PROJECT_NAME=bangla-adventures\nELEVENLABS_API_KEY=existing-private-value\n`;
+  writeFileSync(path.join(directory, ".env"), original);
+  failed(f.remote({ stage: f.stage(), origin: "https://banglaadventure.com", port: "3001", health: "", env: { MOCK_PUBLIC_HEALTH_FAIL: image } }));
+  assert.equal(readFileSync(path.join(directory, ".env"), "utf8"), original);
+  assert.ok(f.calls().some(call => call.command === "curl" && call.appImage === previous && call.args.includes("http://127.0.0.1:3000/api/health")));
+});
+
+test("production bootstrap refuses an existing staging data project", t => {
+  const f = fixture(t);
+  const settingsPath = path.join(f.root, "remote", ".env");
+  const settings = `PUBLIC_ORIGIN=https://staging.example.invalid\nCOMPOSE_PROJECT_NAME=bangla-adventures-staging\nAPP_IMAGE=${previous}\n`;
+  writeFileSync(settingsPath, settings);
+  const result = f.remote({ origin: "https://banglaadventure.com", port: "3001" });
+  failed(result);
+  assert.match(result.stderr, /refusing to change the data project/);
+  assert.equal(readFileSync(settingsPath, "utf8"), settings);
+  assert.equal(dockerCalls(f).some(call => call.args[0] === "pull"), false);
+});
 
 test("deployment is disabled unless explicitly enabled, before credentials or SSH are touched", t => {
   const f = fixture(t);
@@ -264,7 +363,7 @@ test("failed external HTTPS health rolls back to the previous image despite heal
     assert.equal(f.currentImage(), previous);
     const starts = dockerCalls(f).filter(call => call.args[0] === "compose" && call.args[1] === "up" && !call.args.includes("--help"));
     assert.deepEqual(starts.map(call => call.appImage), [image, previous]);
-    const external = f.calls().filter(call => call.command === "curl");
+    const external = f.calls().filter(call => call.command === "curl" && call.args.some(arg => arg.startsWith("https://")));
     assert.ok(external.some(call => call.appImage === image));
     assert.ok(external.some(call => call.appImage === previous), "the restored image is checked through public HTTPS too");
     for (const { args } of external) {
@@ -429,7 +528,7 @@ test("a failed first release removes only its candidate files and preserves oper
   assert.equal(existsSync(path.join(directory, "compose.yaml")), false);
   assert.equal(existsSync(path.join(directory, "deploy-remote.sh")), false);
   assert.equal(existsSync(stage), false);
-  assert.ok(dockerCalls(f).some(call => call.args[1] === "stop" && call.appImage === image));
+  assert.ok(dockerCalls(f).some(call => call.args[1] === "down" && call.appImage === image));
 });
 
 test("failed first-release settings restoration is reported and retains the recovery snapshot", t => {
@@ -628,7 +727,7 @@ test("the frontend sends narration settings ahead of the password on the dispatc
   const commands = f.calls().filter(call => call.command === "ssh").map(call => call.args.at(-1));
   assert.equal(commands.length, 4, "create the stage, upload two release files, dispatch");
   assert.equal(commands.some(command => command.includes("narration")), false, "nothing about the settings is uploaded into the stage");
-  assert.match(commands.at(-1), /^bash \S+\/\.deploy-stage\.Fixture123\/deploy-remote\.sh .* \/opt\/bangla-adventures\/\.deploy-stage\.Fixture123 4$/);
+  assert.match(commands.at(-1), /^bash \S+\/\.deploy-stage\.Fixture123\/deploy-remote\.sh .* \/opt\/bangla-adventures\/\.deploy-stage\.Fixture123 4 '' ''$/);
   assert.equal(readFileSync(input, "utf8"), Object.entries(narrationSettings).map(([name, value]) => `${name}=${value}\n`).join("") + "fixture-registry-password");
   quiet(f, result, narrationKey);
   assert.deepEqual(f.temporary(), [], "the local copy is removed");
@@ -641,7 +740,7 @@ test("empty narration settings send nothing, so the server keeps its own", t => 
   const f = fixture(t);
   const input = path.join(f.root, "dispatch-input");
   successful(f.frontend({ ...Object.fromEntries(Object.keys(narrationSettings).map(name => [name, ""])), REGISTRY_PASSWORD: "fixture-registry-password", MOCK_SSH_INPUT: input }));
-  assert.match(f.calls().filter(call => call.command === "ssh").at(-1).args.at(-1), / 0$/);
+  assert.match(f.calls().filter(call => call.command === "ssh").at(-1).args.at(-1), / 0 '' ''$/);
   assert.equal(readFileSync(input, "utf8"), "fixture-registry-password", "only the password is sent");
   assert.deepEqual(f.temporary(), []);
 });
@@ -689,11 +788,13 @@ test("GitHub deployment requires the explicit gate and newest-check lookup error
   const workflow = readFileSync(new URL(".github/workflows/ci.yml", repository), "utf8");
   const deploy = workflow.match(/^  deploy:\n([\s\S]*)$/m)?.[1];
   assert.ok(deploy);
-  assert.match(deploy, /^    if: vars\.DEPLOY_ENABLED == 'true'$/m);
-  assert.match(deploy, /^          DEPLOY_HOST: \$\{\{ secrets\.DEPLOY_HOST \}\}$/m);
+  assert.ok(deploy.includes("if: vars.DEPLOY_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.deploy_loopback == true)"));
+  assert.ok(deploy.includes("DEPLOY_HOST: '169.40.116.23'"));
   assert.match(deploy, /^          DEPLOY_USER: \$\{\{ secrets\.DEPLOY_USER \}\}$/m);
   assert.match(deploy, /^          DEPLOY_REQUIRE_ROOTLESS: 'true'$/m);
-  assert.match(deploy, /^          DEPLOY_REQUIRE_PUBLIC_HEALTH: 'true'$/m);
+  assert.ok(deploy.includes('DEPLOY_REQUIRE_PUBLIC_HEALTH: ${{ inputs.deploy_loopback != true }}'));
+  assert.ok(deploy.includes('DEPLOY_PUBLIC_ORIGIN: https://banglaadventure.com'));
+  assert.ok(deploy.includes("'unix:///run/user/1002/docker.sock'"));
   assert.match(deploy, /^          ELEVENLABS_API_KEY: \$\{\{ secrets\.ELEVENLABS_API_KEY \}\}$/m, "the narration key comes only from a secret");
   for (const name of ["ELEVENLABS_VOICE_ID", "ELEVENLABS_MODEL_ID", "ELEVENLABS_DAILY_CHARACTER_LIMIT"]) {
     assert.match(deploy, new RegExp(`^          ${name}: \\$\\{\\{ vars\\.${name} \\}\\}$`, "m"));
@@ -748,7 +849,7 @@ test("VPS preflights accept the server address secrets at either level and name 
   }
 });
 
-test("VPS templates stay disabled and choose loopback 3001 without changing the generic 3000 default", t => {
+test("VPS templates stay disabled and select the confirmed production origin and proxy loopback 3001", t => {
   const settings = file => Object.fromEntries(readFileSync(new URL(file, repository), "utf8").split("\n").filter(line => /^[A-Z_]+=/.test(line)).map(line => {
     const separator = line.indexOf("=");
     return [line.slice(0, separator), line.slice(separator + 1)];
@@ -760,17 +861,17 @@ test("VPS templates stay disabled and choose loopback 3001 without changing the 
   assert.equal(variables.DEPLOY_KNOWN_HOSTS, "", "the template cannot invent a trusted host key");
   assert.equal(variables.DEPLOY_SSH_KEY, undefined, "private deploy credentials are never part of the variable template");
   const application = settings("deploy/vps.app.env.example");
-  assert.equal(application.PUBLIC_ORIGIN, "", "the actual HTTPS domain requires operator configuration");
+  assert.equal(application.PUBLIC_ORIGIN, "https://banglaadventure.com");
   assert.equal(application.APP_PORT, "3001");
   assert.equal(application.COMPOSE_PROJECT_NAME, "bangla-adventures");
   const compose = readFileSync(new URL("compose.yaml", repository), "utf8");
   const portBlock = compose.match(/^    ports:\n((?:^      [^\n]*\n)+)/m)?.[1];
-  assert.ok(portBlock, "the app explicitly declares its bound port");
+  assert.ok(portBlock, "the proxy explicitly declares its bound port");
   const ports = [...portBlock.matchAll(/^      - "([^"\n]+)"$/gm)].map(match => match[1]);
-  assert.deepEqual(ports, ["127.0.0.1:${APP_PORT:-3000}:3000"]);
+  assert.deepEqual(ports, ["127.0.0.1:${APP_PORT:-3001}:3000"]);
   const f = fixture(t);
   writeFileSync(path.join(f.root, "port-binding.sh"), `printf '%s\\n' "${ports[0]}"\n`);
-  for (const [port, expected] of [["", "127.0.0.1:3000:3000"], [application.APP_PORT, "127.0.0.1:3001:3000"]]) {
+  for (const [port, expected] of [["", "127.0.0.1:3001:3000"], [application.APP_PORT, "127.0.0.1:3001:3000"]]) {
     const result = f.run("port-binding.sh", [], { APP_PORT: port });
     successful(result);
     assert.equal(result.stdout.trim(), expected);

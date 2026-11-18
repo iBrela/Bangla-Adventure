@@ -179,6 +179,17 @@ class MonitorTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ops.evaluate_monitor(facts(**change))
 
+    def test_proxy_checks_are_explicit_and_legacy_facts_remain_valid(self):
+        proxy = {'running': True, 'healthy': True, 'imageCurrent': True}
+        result = ops.evaluate_monitor(facts(proxy=proxy))
+        self.assertTrue(result['verified'])
+        for name, code in [('running', 'proxy-not-running'), ('healthy', 'proxy-unhealthy'), ('imageCurrent', 'proxy-image-mismatch')]:
+            self.assertIn(code, ops.evaluate_monitor(facts(proxy={**proxy, name: False}))['codes'])
+        self.assertNotIn('proxyHealthy', ops.evaluate_monitor(facts())['checks'])
+        for invalid in [True, {}, {**proxy, 'healthy': 1}, {**proxy, 'extra': True}]:
+            with self.assertRaises(ValueError):
+                ops.evaluate_monitor(facts(proxy=invalid))
+
 
 def container(service='app', oneoff='False', bindings=None, running=True, network='bangla-adventures_default', publish_all=False):
     bindings = {'3000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '3001'}]} if bindings is None else bindings
@@ -188,6 +199,22 @@ def container(service='app', oneoff='False', bindings=None, running=True, networ
 
 
 class PortTests(unittest.TestCase):
+    def test_proxy_is_the_only_publisher_and_the_app_is_internal(self):
+        found = [container(bindings={}), container(service='proxy')]
+        self.assertTrue(ops.ports_confined(found, 3001))
+        self.assertTrue(ops.ports_confined([*found, container(service='proxy', oneoff='True', bindings={})], 3001))
+        for invalid in [
+            [container(bindings={})],  # A missing proxy must not silently become an app-only deployment.
+            [container(bindings={}), container(service='proxy', bindings={})],
+            [container(), container(service='proxy')],  # Two publishers are never accepted.
+            [*found, container(service='proxy')],
+            [*found, container(bindings={})],
+            [container(bindings={}), container(service='proxy', oneoff='True')],
+            [container(bindings={}), container(service='proxy', network='host')],
+            [container(bindings={}), container(service='proxy', bindings={'3000/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '3001'}]})],
+        ]:
+            self.assertFalse(ops.ports_confined(invalid, 3001), invalid)
+
     def test_only_the_app_on_loopback_application_port_is_published(self):
         self.assertTrue(ops.ports_confined([container()], 3001))
         self.assertTrue(ops.ports_confined([container(running=False), container(oneoff='True', bindings={})], 3001))
@@ -613,6 +640,29 @@ class BackupTests(unittest.TestCase):
                 patch.object(ops.time, 'sleep'), patch.object(ops.time, 'monotonic', side_effect=[0, 0, 61]):
             self.assertFalse(ops.Production.wait_until_healthy(self.prod, {'project': 'p'}, 60))
 
+    def test_waiting_for_health_requires_the_proxy_when_the_app_is_internal(self):
+        found = [container(bindings={}), container(service='proxy')]
+        with patch.object(self.prod, 'containers', return_value=found):
+            self.assertTrue(ops.Production.wait_until_healthy(self.prod, {'project': 'p'}, 0))
+        for invalid in [found[:1], [found[0], container(service='proxy', running=False)],
+                        [found[0], {**found[1], 'State': {'Running': True, 'Health': {'Status': 'unhealthy'}}}]]:
+            with patch.object(self.prod, 'containers', return_value=invalid):
+                self.assertFalse(ops.Production.wait_until_healthy(self.prod, {'project': 'p'}, 0))
+
+    def test_backup_preflight_checks_the_proxy_image_and_health(self):
+        cfg = {'project': 'p', 'image': IMAGE, 'port': 3001}
+        found = [container(bindings={}), container(service='proxy')]
+        with patch.object(self.prod, 'containers', return_value=found), patch.object(self.prod, 'loopback_health', return_value=True):
+            self.assertIs(ops.Production.wait_until_serving(self.prod, cfg, 0), found[0])
+        for invalid in [found[:1], [found[0], container(service='proxy', running=False)]]:
+            with patch.object(self.prod, 'containers', return_value=invalid), patch.object(self.prod, 'loopback_health', return_value=True):
+                with self.assertRaisesRegex(ops.Refused, 'app-unhealthy-before-backup'):
+                    ops.Production.wait_until_serving(self.prod, cfg, 0)
+        old_proxy = {**found[1], 'Config': {**found[1]['Config'], 'Image': 'old-image'}}
+        with patch.object(self.prod, 'containers', return_value=[found[0], old_proxy]):
+            with self.assertRaisesRegex(ops.Refused, 'proxy-image-mismatch'):
+                ops.Production.wait_until_serving(self.prod, cfg, 0)
+
     def test_helper_cleanup_failure_still_resumes_and_is_reported(self):
         def cleanup(token):
             raise ops.Refused('helper-cleanup-failed')
@@ -1018,6 +1068,19 @@ class MonitorRunTests(unittest.TestCase):
     def test_a_healthy_deployment_passes(self):
         value = self.prod.monitor()
         self.assertEqual((value['status'], value['codes'], value['checks']['backupLockClear']), ('healthy', [], True))
+
+    def test_proxy_deployment_checks_both_services_and_detects_a_missing_proxy(self):
+        found = [container(bindings={}), container(service='proxy')]
+        with patch.object(self.prod, 'containers', return_value=found):
+            value = self.prod.monitor()
+        self.assertEqual(value['codes'], [])
+        self.assertTrue(value['checks']['proxyHealthy'])
+        for invalid, code in [(found[:1], 'proxy-not-running'),
+                              ([found[0], container(service='proxy', running=False)], 'proxy-not-running'),
+                              ([found[0], {**found[1], 'State': {'Running': True, 'Health': {'Status': 'unhealthy'}}}], 'proxy-unhealthy')]:
+            self.busy = [False, False]
+            with patch.object(self.prod, 'containers', return_value=invalid):
+                self.assertIn(code, self.prod.monitor()['codes'])
 
     def test_a_backup_lock_while_the_deploy_lock_is_free_is_reported(self):
         self.latest = {**self.latest, 'backupLock': True}
